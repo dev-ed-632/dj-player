@@ -15,10 +15,10 @@ export default function Turntable({
 }) {
   const controls = useAnimation();
   const rotationValue = useMotionValue(0);
-  const lastRotation = useRef(0);
+  const lastRotation = useRef(0); // Accumulate total rotation
   const [isDragging, setIsDragging] = useState(false);
+  const prevMousePosition = useRef(null); // Track mouse position for direction
   const discRef = useRef(null);
-  const draggingInterval = useRef(null);
 
   const scratchAudioContext = useRef(null);
   const scratchBufferSource = useRef(null);
@@ -34,14 +34,11 @@ export default function Turntable({
       });
   }, []);
 
-  const playScratchEffect = (speed) => {
+  const playScratchEffect = () => {
     if (!scratchAudioContext.current || !scratchBufferSource.current) return;
     const source = scratchAudioContext.current.createBufferSource();
-    const gainNode = scratchAudioContext.current.createGain();
     source.buffer = scratchBufferSource.current;
-    source.playbackRate.value = Math.abs(speed);
-    gainNode.gain.value = Math.min(Math.abs(speed * 0.2), 0.3);
-    source.connect(gainNode).connect(scratchAudioContext.current.destination);
+    source.connect(scratchAudioContext.current.destination);
     source.start();
     source.onended = () => source.disconnect();
   };
@@ -50,7 +47,7 @@ export default function Turntable({
   useEffect(() => {
     if (isPlaying && !isDragging) {
       controls.start({
-        rotate: [0, 360],
+        rotate: [lastRotation.current, lastRotation.current + 360],
         transition: {
           duration: 2,
           repeat: Infinity,
@@ -62,59 +59,45 @@ export default function Turntable({
     }
   }, [isPlaying, isDragging, controls]);
 
-  useEffect(() => {
-    return () => clearInterval(draggingInterval.current);
-  }, []);
-
   const bind = useGesture(
     {
       onDragStart: ({ event }) => {
         event.preventDefault();
         setIsDragging(true);
         controls.stop();
-        if (audioRef.current) {
-          audioRef.current.preservesPitch = false; // Disable pitch preservation for dragging
-        }
+        prevMousePosition.current = null; // Reset mouse tracking
+        playScratchEffect(); // Play scratch sound when drag starts
       },
-      onDrag: ({ movement: [mx], velocity: [vx], direction: [dx] }) => {
-        if (!audioRef.current || !discRef.current) return;
+      onDrag: ({ movement: [mx], event }) => {
+        event.preventDefault();
+        if (!discRef.current) return;
 
-        const maxSpeed = 4; // Limit the speed for smoother control
-        const speed = dx * Math.min(Math.abs(mx * 0.1), maxSpeed);
+        const centerX = discRef.current.offsetWidth / 2;
+        const centerY = discRef.current.offsetHeight / 2;
 
-        rotationValue.set(lastRotation.current + mx);
+        const { clientX, clientY } = event;
+        const mouseX = clientX - discRef.current.offsetLeft - centerX;
+        const mouseY = clientY - discRef.current.offsetTop - centerY;
 
-        // Calculate playback rate
-        if (speed < 0) {
-          // Simulate reverse playback
-          if (!draggingInterval.current) {
-            draggingInterval.current = setInterval(() => {
-              if (audioRef.current) {
-                audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 0.05);
-              }
-            }, 50);
-          }
-        } else {
-          // Play normally
-          clearInterval(draggingInterval.current);
-          draggingInterval.current = null;
-          audioRef.current.playbackRate = Math.max(Math.abs(speed), 0.5); // Ensure minimum speed
+        const angle = Math.atan2(mouseY, mouseX) * (180 / Math.PI);
+
+        if (prevMousePosition.current === null) {
+          prevMousePosition.current = angle;
+          return;
         }
 
-        // Trigger scratch effect
-        playScratchEffect(speed);
+        const angleDiff = angle - prevMousePosition.current;
+        prevMousePosition.current = angle;
+
+        const normalizedDiff = ((angleDiff + 180) % 360) - 180;
+
+        // Accumulate rotation
+        lastRotation.current += normalizedDiff;
+        rotationValue.set(lastRotation.current);
       },
       onDragEnd: () => {
         setIsDragging(false);
-        clearInterval(draggingInterval.current);
-        draggingInterval.current = null;
-
-        // Reset playback to normal
-        lastRotation.current = rotationValue.get();
-        if (audioRef.current) {
-          audioRef.current.playbackRate = 1;
-          audioRef.current.preservesPitch = true; // Re-enable pitch preservation
-        }
+        prevMousePosition.current = null;
 
         if (isPlaying) {
           controls.start({
@@ -130,7 +113,6 @@ export default function Turntable({
     },
     {
       drag: {
-        from: () => [rotationValue.get(), 0],
         preventDefault: true,
       },
     }
