@@ -5,28 +5,48 @@ import { useGesture } from '@use-gesture/react';
 import { useEffect, useRef, useState } from 'react';
 import WaveformDisplay from './WaveformDisplay';
 
-
 export default function Turntable({ 
   audioRef, 
   isPlaying, 
   onPlay, 
   currentTime, 
   duration,
-  analyserNode
+  analyserNode 
 }) {
   const controls = useAnimation();
   const rotationValue = useMotionValue(0);
   const lastRotation = useRef(0);
   const [isDragging, setIsDragging] = useState(false);
-  const scratchSoundRef = useRef(null);
+  const discRef = useRef(null);
+  const draggingInterval = useRef(null);
 
-  // Load scratch sound
+  const scratchAudioContext = useRef(null);
+  const scratchBufferSource = useRef(null);
+
+  // Initialize Web Audio API for scratch effects
   useEffect(() => {
-    scratchSoundRef.current = new Audio('/scratch.mp3'); // You'll need to add this sound file
-    scratchSoundRef.current.loop = true;
+    scratchAudioContext.current = new (window.AudioContext || window.webkitAudioContext)();
+    fetch('/scratch.mp3')
+      .then((response) => response.arrayBuffer())
+      .then((buffer) => scratchAudioContext.current.decodeAudioData(buffer))
+      .then((decodedBuffer) => {
+        scratchBufferSource.current = decodedBuffer;
+      });
   }, []);
 
-  // Normal playback rotation
+  const playScratchEffect = (speed) => {
+    if (!scratchAudioContext.current || !scratchBufferSource.current) return;
+    const source = scratchAudioContext.current.createBufferSource();
+    const gainNode = scratchAudioContext.current.createGain();
+    source.buffer = scratchBufferSource.current;
+    source.playbackRate.value = Math.abs(speed);
+    gainNode.gain.value = Math.min(Math.abs(speed * 0.2), 0.3);
+    source.connect(gainNode).connect(scratchAudioContext.current.destination);
+    source.start();
+    source.onended = () => source.disconnect();
+  };
+
+  // Smooth rotation during playback
   useEffect(() => {
     if (isPlaying && !isDragging) {
       controls.start({
@@ -34,145 +54,142 @@ export default function Turntable({
         transition: {
           duration: 2,
           repeat: Infinity,
-          ease: "linear"
-        }
+          ease: 'linear',
+        },
       });
     } else {
       controls.stop();
     }
   }, [isPlaying, isDragging, controls]);
 
-  const bind = useGesture({
-    onDragStart: () => {
-      setIsDragging(true);
-      controls.stop();
-      if (audioRef.current) {
-        audioRef.current.preservePitch = false;
-      }
-    },
-    onDrag: ({ movement: [x], velocity: [vx], direction: [dx] }) => {
-      if (!audioRef.current) return;
+  useEffect(() => {
+    return () => clearInterval(draggingInterval.current);
+  }, []);
 
-      // Calculate rotation based on drag
-      const newRotation = lastRotation.current + (x * 0.5);
-      rotationValue.set(newRotation % 360);
-
-      // Calculate playback rate based on velocity
-      const direction = dx > 0 ? 1 : -1;
-      const speed = Math.min(Math.abs(vx) * 0.005, 4); // Reduced multiplier for more control
-      const playbackRate = direction * (speed || 1);
-
-      // Ensure playback rate is within valid range (-16 to 16)
-      const clampedRate = Math.max(-16, Math.min(16, playbackRate));
-      
-      // Apply playback effects
-      try {
-        audioRef.current.playbackRate = Math.abs(clampedRate) < 0.1 ? 0 : clampedRate;
-
-        // Handle scratch sound
-        if (Math.abs(vx) > 1) {
-          if (scratchSoundRef.current && !scratchSoundRef.current.playing) {
-            scratchSoundRef.current.play();
-            scratchSoundRef.current.volume = Math.min(Math.abs(vx) * 0.001, 0.3);
-          }
-        } else if (scratchSoundRef.current) {
-          scratchSoundRef.current.pause();
-          scratchSoundRef.current.currentTime = 0;
+  const bind = useGesture(
+    {
+      onDragStart: ({ event }) => {
+        event.preventDefault();
+        setIsDragging(true);
+        controls.stop();
+        if (audioRef.current) {
+          audioRef.current.preservesPitch = false; // Disable pitch preservation for dragging
         }
-      } catch (error) {
-        console.error('Playback rate error:', error);
-      }
-    },
-    onDragEnd: () => {
-      setIsDragging(false);
-      lastRotation.current = rotationValue.get();
+      },
+      onDrag: ({ movement: [mx], velocity: [vx], direction: [dx] }) => {
+        if (!audioRef.current || !discRef.current) return;
 
-      if (audioRef.current) {
-        audioRef.current.playbackRate = 1;
-        audioRef.current.preservePitch = true;
-      }
+        const maxSpeed = 4; // Limit the speed for smoother control
+        const speed = dx * Math.min(Math.abs(mx * 0.1), maxSpeed);
 
-      if (scratchSoundRef.current) {
-        scratchSoundRef.current.pause();
-        scratchSoundRef.current.currentTime = 0;
-      }
+        rotationValue.set(lastRotation.current + mx);
 
-      if (isPlaying) {
-        controls.start({
-          rotate: [lastRotation.current, lastRotation.current + 360],
-          transition: {
-            duration: 2,
-            repeat: Infinity,
-            ease: "linear"
+        // Calculate playback rate
+        if (speed < 0) {
+          // Simulate reverse playback
+          if (!draggingInterval.current) {
+            draggingInterval.current = setInterval(() => {
+              if (audioRef.current) {
+                audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 0.05);
+              }
+            }, 50);
           }
-        });
-      }
+        } else {
+          // Play normally
+          clearInterval(draggingInterval.current);
+          draggingInterval.current = null;
+          audioRef.current.playbackRate = Math.max(Math.abs(speed), 0.5); // Ensure minimum speed
+        }
+
+        // Trigger scratch effect
+        playScratchEffect(speed);
+      },
+      onDragEnd: () => {
+        setIsDragging(false);
+        clearInterval(draggingInterval.current);
+        draggingInterval.current = null;
+
+        // Reset playback to normal
+        lastRotation.current = rotationValue.get();
+        if (audioRef.current) {
+          audioRef.current.playbackRate = 1;
+          audioRef.current.preservesPitch = true; // Re-enable pitch preservation
+        }
+
+        if (isPlaying) {
+          controls.start({
+            rotate: [lastRotation.current, lastRotation.current + 360],
+            transition: {
+              duration: 2,
+              repeat: Infinity,
+              ease: 'linear',
+            },
+          });
+        }
+      },
+    },
+    {
+      drag: {
+        from: () => [rotationValue.get(), 0],
+        preventDefault: true,
+      },
     }
-  });
+  );
+
+  const handleSeek = (time) => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = time;
+    }
+  };
 
   return (
-    <div className="relative w-full aspect-square max-w-2xl mx-auto">
-      {/* Vinyl record with grooves */}
-      <motion.div
-        {...bind()}
-        animate={controls}
-        style={{ rotate: rotationValue }}
-        className="absolute inset-0 cursor-grab active:cursor-grabbing"
-      >
-        <div className="relative w-full h-full">
-          {/* Main vinyl disc */}
-          <div className="absolute inset-0 rounded-full bg-[#2d2d2d] shadow-lg">
-            {/* Grooves */}
-            {Array.from({ length: 40 }).map((_, i) => (
-              <div
-                key={i}
-                className="absolute inset-0 rounded-full border border-[#222]"
-                style={{
-                  margin: `${(i + 1) * 2.5}%`,
-                  opacity: 1 - (i * 0.02)
-                }}
-              />
-            ))}
-
-            {/* Center label */}
-            <div 
-              className="absolute inset-[30%] rounded-full bg-gradient-to-br from-[#333] to-[#222] flex items-center justify-center"
-              onClick={onPlay}
-            >
-              <div className="absolute inset-[40%] rounded-full bg-[#111] flex items-center justify-center">
-                <div className="w-6 h-6 text-white">
-                  {isPlaying ? (
-                    <svg viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/>
-                    </svg>
-                  ) : (
-                    <svg viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M8 5v14l11-7z"/>
-                    </svg>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </motion.div>
-
-      {/* Tonearm */}
-      <div className="absolute top-0 right-0 w-1/3 h-1/2 origin-bottom-right rotate-45">
-        <div className="w-1 h-full bg-gray-600 transform -translate-x-1/2">
-          <div className="absolute bottom-0 w-4 h-4 bg-gray-500 rounded-full transform -translate-x-1/2" />
-        </div>
-      </div>
-
-      {/* Waveform overlay */}
-      <div className="absolute inset-0 opacity-30">
-        <WaveformDisplay 
+    <div className="flex flex-col gap-4 w-full max-w-2xl mx-auto">
+      {/* Waveform Section */}
+      <div className="h-24 relative bg-gray-900 rounded-lg overflow-hidden">
+        <WaveformDisplay
           analyser={analyserNode}
           isPlaying={isPlaying}
           currentTime={currentTime}
           duration={duration}
+          audioRef={audioRef}
+          onSeek={handleSeek}
         />
+      </div>
+
+      {/* Turntable Section */}
+      <div className="relative aspect-square">
+        <motion.div
+          ref={discRef}
+          {...bind()}
+          animate={controls}
+          style={{ rotate: rotationValue }}
+          className="absolute inset-0 cursor-grab active:cursor-grabbing touch-none"
+        >
+          <div className="absolute inset-0 rounded-full bg-gray-800 shadow-lg">
+            {Array.from({ length: 30 }).map((_, i) => (
+              <div
+                key={i}
+                className="absolute inset-0 rounded-full border border-gray-600"
+                style={{
+                  margin: `${(i + 1) * 3}%`,
+                  opacity: 1 - i * 0.05,
+                }}
+              />
+            ))}
+          </div>
+          <div
+            className="absolute inset-[35%] rounded-full bg-gradient-to-br from-gray-700 to-gray-500"
+            onClick={(e) => {
+              e.stopPropagation();
+              onPlay();
+            }}
+          >
+            <div className="absolute inset-[40%] rounded-full bg-gray-400 flex items-center justify-center">
+              {isPlaying ? 'Pause' : 'Play'}
+            </div>
+          </div>
+        </motion.div>
       </div>
     </div>
   );
-} 
+}
