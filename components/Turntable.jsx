@@ -22,6 +22,7 @@ export default function Turntable({
 
   const scratchAudioContext = useRef(null);
   const scratchBufferSource = useRef(null);
+  const scratchLoopSource = useRef(null); // For continuous scratch sound
 
   // Initialize Web Audio API for scratch effects
   useEffect(() => {
@@ -34,13 +35,22 @@ export default function Turntable({
       });
   }, []);
 
-  const playScratchEffect = () => {
-    if (!scratchAudioContext.current || !scratchBufferSource.current) return;
+  const startScratchSound = () => {
+    if (!scratchAudioContext.current || !scratchBufferSource.current || scratchLoopSource.current) return;
     const source = scratchAudioContext.current.createBufferSource();
     source.buffer = scratchBufferSource.current;
+    source.loop = true;
     source.connect(scratchAudioContext.current.destination);
     source.start();
-    source.onended = () => source.disconnect();
+    scratchLoopSource.current = source;
+  };
+
+  const stopScratchSound = () => {
+    if (scratchLoopSource.current) {
+      scratchLoopSource.current.stop();
+      scratchLoopSource.current.disconnect();
+      scratchLoopSource.current = null;
+    }
   };
 
   // Smooth rotation during playback
@@ -66,39 +76,52 @@ export default function Turntable({
         setIsDragging(true);
         controls.stop();
         prevMousePosition.current = null; // Reset mouse tracking
-        playScratchEffect(); // Play scratch sound when drag starts
+        startScratchSound(); // Start continuous scratch sound
       },
       onDrag: ({ movement: [mx], event }) => {
         event.preventDefault();
-        if (!discRef.current) return;
-
+        if (!discRef.current || !audioRef.current) return;
+  
         const centerX = discRef.current.offsetWidth / 2;
         const centerY = discRef.current.offsetHeight / 2;
-
+  
         const { clientX, clientY } = event;
         const mouseX = clientX - discRef.current.offsetLeft - centerX;
         const mouseY = clientY - discRef.current.offsetTop - centerY;
-
+  
         const angle = Math.atan2(mouseY, mouseX) * (180 / Math.PI);
-
+  
         if (prevMousePosition.current === null) {
           prevMousePosition.current = angle;
           return;
         }
-
-        const angleDiff = angle - prevMousePosition.current;
+  
+        let angleDiff = angle - prevMousePosition.current;
+  
+        // Normalize angle difference to handle continuous rotation across 180/-180 threshold
+        if (angleDiff > 180) {
+          angleDiff -= 360;
+        } else if (angleDiff < -180) {
+          angleDiff += 360;
+        }
+  
+        // Update previous mouse position for the next drag event
         prevMousePosition.current = angle;
-
-        const normalizedDiff = ((angleDiff + 180) % 360) - 180;
-
-        // Accumulate rotation
-        lastRotation.current += normalizedDiff;
+  
+        // Accumulate rotation (track forward and backward)
+        lastRotation.current += angleDiff;
         rotationValue.set(lastRotation.current);
+  
+        // Seek in audio based on angle difference
+        const seekTime = audioRef.current.currentTime + angleDiff * 0.05; // Adjust seek sensitivity
+        audioRef.current.currentTime = Math.max(0, Math.min(seekTime, duration));
       },
       onDragEnd: () => {
         setIsDragging(false);
         prevMousePosition.current = null;
-
+  
+        stopScratchSound(); // Stop continuous scratch sound
+  
         if (isPlaying) {
           controls.start({
             rotate: [lastRotation.current, lastRotation.current + 360],
@@ -117,6 +140,7 @@ export default function Turntable({
       },
     }
   );
+  
 
   const handleSeek = (time) => {
     if (audioRef.current) {
